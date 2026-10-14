@@ -1,0 +1,81 @@
+name: G-Trend alertas
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Calcular seÃ±ales y avisar por Telegram
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 - <<'PY'
+          import os, json, urllib.request, urllib.parse
+
+          L = 25  # longitud del indicador (la de tu captura)
+          URL = "https://www.okx.com/api/v5/market/candles?instId=BTC-USDT-SWAP&bar=5m&limit=300"
+          STATE = "last_signal.txt"
+
+          def send(text):
+              u = "https://api.telegram.org/bot%s/sendMessage" % os.environ["TELEGRAM_TOKEN"]
+              d = urllib.parse.urlencode({"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text}).encode()
+              urllib.request.urlopen(u, d, timeout=20).read()
+
+          req = urllib.request.Request(URL, headers={"User-Agent": "Mozilla/5.0"})
+          data = json.load(urllib.request.urlopen(req, timeout=20))["data"]
+          # mÃ¡s antiguas primero, solo velas ya cerradas
+          c = [(int(x[0]), float(x[4])) for x in reversed(data) if x[8] == "1"]
+
+          a_prev = b_prev = 0.0
+          last_up = last_dn = None
+          prev_bull = None
+          signals = []
+          for i, (t, close) in enumerate(c):
+              g = (a_prev - b_prev) / L
+              a = max(close, a_prev) - g
+              b = min(close, b_prev) + g
+              if i > 0:
+                  pc = c[i - 1][1]
+                  if b_prev < pc and b > close:
+                      last_up = i
+                  if a_prev < pc and a > close:
+                      last_dn = i
+              bull = last_up is not None and last_dn is not None and last_dn >= last_up
+              if prev_bull is not None:
+                  if bull and not prev_bull:
+                      signals.append((t, "COMPRA ðŸŸ¢", close))
+                  elif (not bull) and prev_bull:
+                      signals.append((t, "VENTA ðŸ”´", close))
+              prev_bull = bull
+              a_prev, b_prev = a, b
+
+          latest = signals[-1][0] if signals else 0
+
+          if not os.path.exists(STATE):
+              open(STATE, "w").write(str(latest))
+              send("âœ… Bot de G-Trend activo (BTC 5m). Te avisarÃ© en cada seÃ±al.")
+          else:
+              seen = int(open(STATE).read().strip() or 0)
+              new = [s for s in signals if s[0] > seen]
+              for t, kind, price in new:
+                  send("G-Trend BTC 5m: %s\nPrecio de cierre: %.1f" % (kind, price))
+              if new:
+                  open(STATE, "w").write(str(new[-1][0]))
+          PY
+
+      - name: Guardar estado
+        run: |
+          git config user.name "gtrend-bot"
+          git config user.email "gtrend-bot@users.noreply.github.com"
+          git add last_signal.txt
+          git diff --cached --quiet || (git commit -m "estado" && git push)
